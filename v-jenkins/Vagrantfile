@@ -1,0 +1,84 @@
+# -- mode: ruby --
+# vi: set ft=ruby :
+Vagrant.configure("2") do |config|
+  # Общие настройки для всех машин
+  config.vm.box = "ubuntu/jammy64"
+  config.vm.box_check_update = false
+  # Настройка сети
+  NETWORK_PREFIX = "192.168.56"
+  
+  # Настройка общего провижининга для всех машин
+  config.vm.provision "shell", inline: <<-SHELL
+    # Настройка файла hosts для всех машин
+    cat > /etc/hosts <<EOL
+127.0.0.1 localhost
+#{NETWORK_PREFIX}.10 jenkins
+#{NETWORK_PREFIX}.11 node-1
+#{NETWORK_PREFIX}.12 node-2
+EOL
+    # Перезагрузка сетевых интерфейсов
+    systemctl restart systemd-networkd
+    ip addr show
+  SHELL
+
+  # Копирование SSH ключей
+  config.vm.provision "file",
+    source: "~/.ssh/id_rsa",
+    destination: "/home/vagrant/.ssh/id_rsa"
+  config.vm.provision "file",
+    source: "~/.ssh/id_rsa.pub",
+    destination: "/home/vagrant/.ssh/id_rsa.pub"
+
+  # Установка правильных прав на SSH ключи и настройка sshd
+  config.vm.provision "shell", inline: <<-SHELL
+    chmod 600 /home/vagrant/.ssh/id_rsa
+    chmod 644 /home/vagrant/.ssh/id_rsa.pub
+    cat /home/vagrant/.ssh/id_rsa.pub >> /home/vagrant/.ssh/authorized_keys
+    chmod 600 /home/vagrant/.ssh/authorized_keys
+    sudo sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+    systemctl restart sshd
+  SHELL
+
+  # Настройка двух рабочих нод
+  (1..2).each do |i|
+    config.vm.define "node-#{i}" do |node|
+      node.vm.hostname = "node-#{i}"
+      node.vm.network "private_network", ip: "#{NETWORK_PREFIX}.#{i + 10}"
+      node.vm.provider "virtualbox" do |vb|
+        vb.memory = "1024"
+        vb.cpus = 1
+      end
+      node.vm.provision "shell", inline: "apt-get update"
+    end
+  end
+
+  # Настройка Jenkins-ноды
+  config.vm.define "jenkins" do |master|
+    master.vm.hostname = "jenkins"
+    master.vm.network "private_network", ip: "#{NETWORK_PREFIX}.10"
+    master.vm.network "forwarded_port", guest: 8080, host: 8080 # Проброс порта для Jenkins
+    
+    master.vm.provider "virtualbox" do |vb|
+      vb.memory = "2048"
+      vb.cpus = 2
+    end
+  
+
+    # Установка и настройка Jenkins
+    master.vm.provision "shell", inline: <<-SHELL
+      # Установка необходимых пакетов
+      apt-get update
+      apt-get install -y software-properties-common sshpass
+      sudo wget -O /usr/share/keyrings/jenkins-keyring.asc \
+        https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+      echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc]" \
+        https://pkg.jenkins.io/debian-stable binary/ | sudo tee \
+        /etc/apt/sources.list.d/jenkins.list > /dev/null
+      sudo apt-get update
+      sudo apt-get install -y fontconfig openjdk-17-jre jenkins
+
+      sudo chown -R jenkins:jenkins /var/lib/jenkins
+
+    SHELL
+  end
+end

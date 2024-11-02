@@ -1,0 +1,110 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  # Общие настройки для всех машин
+  config.vm.box = "ubuntu/jammy64"
+  config.vm.box_check_update = false
+
+  # Настройка сети
+  NETWORK_PREFIX = "192.168.56"
+
+  # Настройка общего провижининга для всех машин
+  config.vm.provision "shell", inline: <<-SHELL
+    # Настройка файла hosts для всех машин
+    cat > /etc/hosts <<EOL
+127.0.0.1 localhost
+#{NETWORK_PREFIX}.10 ansible-master
+#{NETWORK_PREFIX}.11 node-1
+#{NETWORK_PREFIX}.12 node-2
+EOL
+
+    # Перезагрузка сетевых интерфейсов
+    systemctl restart systemd-networkd
+    ip addr show
+  SHELL
+
+  # Копирование SSH ключей
+  config.vm.provision "file", 
+    source: "~/.ssh/id_rsa", 
+    destination: "/home/vagrant/.ssh/id_rsa"
+
+  config.vm.provision "file", 
+    source: "~/.ssh/id_rsa.pub", 
+    destination: "/home/vagrant/.ssh/id_rsa.pub"
+
+  # Установка правильных прав на SSH ключи и настройка sshd
+  config.vm.provision "shell", inline: <<-SHELL
+    # Настройка прав доступа для SSH ключей
+    chmod 600 /home/vagrant/.ssh/id_rsa
+    chmod 644 /home/vagrant/.ssh/id_rsa.pub
+
+    # Добавление публичного ключа в authorized_keys
+    cat /home/vagrant/.ssh/id_rsa.pub >> /home/vagrant/.ssh/authorized_keys
+    chmod 600 /home/vagrant/.ssh/authorized_keys
+
+    # Включение аутентификации по ключу в sshd_config
+    sudo sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+
+    # Перезапуск SSH сервиса
+    systemctl restart sshd
+  SHELL
+
+  # Настройка двух рабочих нод
+  (1..2).each do |i|
+    config.vm.define "node-#{i}" do |node|
+      node.vm.hostname = "node-#{i}"
+      node.vm.network "private_network", ip: "#{NETWORK_PREFIX}.#{i + 10}"
+      
+      node.vm.provider "virtualbox" do |vb|
+        vb.memory = "1024"
+        vb.cpus = 1
+      end
+
+      # Настройка ноды
+      node.vm.provision "shell", inline: <<-SHELL
+        apt-get update
+      SHELL
+    end
+  end
+
+  # Настройка мастер-ноды с Ansible
+  config.vm.define "ansible-master" do |master|
+    master.vm.hostname = "ansible-master"
+    master.vm.network "private_network", ip: "#{NETWORK_PREFIX}.10"
+    
+    master.vm.provider "virtualbox" do |vb|
+      vb.memory = "2048"
+      vb.cpus = 2
+    end
+
+    # Установка и настройка Ansible
+    master.vm.provision "shell", inline: <<-SHELL
+      # Установка необходимых пакетов
+      apt-get update
+      apt-get install -y software-properties-common sshpass
+      apt-add-repository --yes --update ppa:ansible/ansible
+      apt-get install -y ansible
+      
+      # Создание inventory файла для Ansible
+      su - vagrant -c "cat > ~/hosts <<EOL
+[nodes]
+node-1
+node-2
+EOL"
+
+      # Настройка конфигурации Ansible
+      su - vagrant -c "cat > ~/ansible.cfg <<EOL
+[defaults]
+inventory = ~/hosts
+host_key_checking = False
+remote_user = vagrant
+EOL"
+
+      # Проверка сетевой доступности
+      echo "Testing network connectivity..."
+      ping -c 2 node-1
+      ping -c 2 node-2
+    SHELL
+  end
+end
